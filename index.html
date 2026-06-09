@@ -86,8 +86,8 @@ tbody tr.tot td{font-weight:700;color:var(--txt)}
 tbody td{padding:7px 10px;text-align:right;color:var(--txt2);font-family:var(--mono);font-size:11px;white-space:nowrap}
 tbody td.lft{text-align:left;color:var(--txt);font-family:var(--font);font-size:12px;font-weight:500}
 tbody td.sticky{position:sticky;left:0;background:var(--surf);font-family:var(--font);text-align:left;color:var(--txt);font-weight:500;font-size:11px}
-tbody tr.tot td.sticky{background:var(--surf2)}
-tbody tr:hover td.sticky{background:#161b22}
+tbody tr.tot td.sticky{background:var(--surf2);color:var(--txt)}
+tbody tr:hover td.sticky{background:var(--surf3,var(--surf2));color:var(--txt)}
 .vp{color:var(--red)!important}.vn{color:var(--grn)!important}.vz{color:var(--txt3)!important}
 .rb{font-size:10px;font-weight:600;padding:1px 6px;border-radius:3px;display:inline-block}
 .r-usi{background:rgba(163,113,247,.2);color:var(--pur)}.r-us{background:rgba(47,129,247,.2);color:var(--acc)}
@@ -250,13 +250,13 @@ tbody tr:hover .var-pct{color:var(--txt2)}
 
 /* GL / general */
 .gl-l1-row{background:rgba(47,129,247,0.06);border-bottom:1px solid var(--bdr2)}
-.gl-l1-row:hover{background:rgba(47,129,247,0.12)}
+.gl-l1-row:hover{background:rgba(47,129,247,0.12)}.gl-l1-row:hover td{color:var(--txt)}
 .gl-l2-row{background:rgba(47,129,247,0.03);border-bottom:1px solid var(--bdr2)}
-.gl-l2-row:hover{background:rgba(47,129,247,0.08)}
+.gl-l2-row:hover{background:rgba(47,129,247,0.08)}.gl-l2-row:hover td{color:var(--txt)}
 .gl-l3-row{background:rgba(163,113,247,0.03);border-bottom:1px solid var(--bdr2)}
-.gl-l3-row:hover{background:rgba(163,113,247,0.08)}
+.gl-l3-row:hover{background:rgba(163,113,247,0.08)}.gl-l3-row:hover td{color:var(--txt)}
 .gl-l4-row{background:transparent;border-bottom:1px solid var(--bdr2)}
-.gl-l4-row:hover{background:rgba(255,255,255,0.02)}
+.gl-l4-row:hover{background:rgba(255,255,255,0.02)}.gl-l4-row:hover td{color:var(--txt)}
 .gl-l5-row{background:rgba(0,0,0,0.04);border-bottom:1px solid var(--bdr2)}
 .gl-l5-row:hover{background:rgba(255,255,255,0.03)}
 .gl-toggle{display:inline-block;width:12px;font-size:9px;color:var(--txt3);margin-right:4px}
@@ -717,6 +717,52 @@ function refreshFromShared(){
   loadSharedData(function(){
     renderCurrentTab();
     showToast('Refreshed from shared storage');
+  });
+}
+
+// Shows a non-intrusive banner when another user has saved a new version.
+// Never auto-applies — user decides when to load the new version.
+function _showNewVersionBanner(meta){
+  var existing = document.getElementById('new-version-banner');
+  if(existing) existing.remove();
+
+  var author  = meta.author || 'A teammate';
+  var time    = meta.tsLocal || meta.ts || '';
+  var color   = meta.color  || '#2f81f7';
+  var initials = author.trim().split(/\s+/).map(function(w){ return w[0]; }).join('').toUpperCase().slice(0,2);
+
+  var b = document.createElement('div');
+  b.id = 'new-version-banner';
+  b.style.cssText = 'position:fixed;bottom:24px;right:24px;background:var(--surf);border:1px solid var(--acc);'
+    + 'border-radius:10px;padding:12px 16px;z-index:9500;box-shadow:0 6px 24px rgba(0,0,0,.5);'
+    + 'max-width:320px;display:flex;align-items:flex-start;gap:10px;font-size:12px;animation:fadeIn .3s ease';
+  b.innerHTML = '<div style="width:32px;height:32px;border-radius:50%;background:'+color+';display:flex;align-items:center;'
+    + 'justify-content:center;font-size:11px;font-weight:700;color:#fff;flex-shrink:0">'+initials+'</div>'
+    + '<div style="flex:1;min-width:0">'
+    + '<div style="font-weight:600;color:var(--txt);margin-bottom:2px">New version available</div>'
+    + '<div style="color:var(--txt3);margin-bottom:8px"><strong style="color:var(--txt)">'+author+'</strong> saved at '+time+'</div>'
+    + '<div style="display:flex;gap:6px">'
+    + '<button onclick="_applyNewVersion()" style="flex:1;background:var(--acc);color:#fff;border:none;border-radius:5px;'
+    + 'padding:5px 10px;cursor:pointer;font-size:11px;font-weight:600">&#8635; Load now</button>'
+    + '<button onclick="document.getElementById(\'new-version-banner\').remove()" style="background:var(--surf2);'
+    + 'color:var(--txt3);border:1px solid var(--bdr);border-radius:5px;padding:5px 10px;cursor:pointer;font-size:11px">'
+    + 'Dismiss</button>'
+    + '</div></div>';
+  document.body.appendChild(b);
+
+  // Auto-dismiss after 30 seconds if ignored
+  setTimeout(function(){ if(b.parentNode) b.remove(); }, 30000);
+}
+
+function _applyNewVersion(){
+  var banner = document.getElementById('new-version-banner');
+  if(banner) banner.remove();
+  if(isDirty){
+    if(!confirm('You have unsaved changes. Loading the new version will discard them. Continue?')) return;
+  }
+  loadSharedData(function(){
+    renderCurrentTab();
+    showToast('Loaded latest version from shared storage');
   });
 }
 
@@ -2800,7 +2846,27 @@ const _HIER_B64 = "1L1rc+M21i76V1iZqplzTsUycQdmf1LbalvdsuWW5HR66q2acjpK4jOOnW27M
     initUserIdentity();
     restoreUploadedData();
     loadSharedData(function() { renderOverview(); });
-    setInterval(function() { if (!isDirty) loadSharedData(function() { renderCurrentTab(); }); }, 60000);
+
+    // Smart background sync — checks every 3 minutes but NEVER overwrites unsaved work.
+    // Instead shows a gentle banner so the user can choose when to refresh.
+    var _lastKnownSaveTs = null;
+    setInterval(function(){
+      if(isDirty) return; // user has unsaved changes — never touch their work
+      _ghRead(GH.stateGistId, GH.stateFile).then(function(state){
+        if(!state || !state.meta) return;
+        var remoteTs = state.meta.ts;
+        if(!_lastKnownSaveTs){
+          // First check — just record the current remote timestamp
+          _lastKnownSaveTs = remoteTs;
+          return;
+        }
+        if(remoteTs !== _lastKnownSaveTs){
+          // A different user saved — show banner, don't auto-apply
+          _lastKnownSaveTs = remoteTs;
+          _showNewVersionBanner(state.meta);
+        }
+      }).catch(function(){});
+    }, 3 * 60 * 1000); // every 3 minutes
     setBar(100);
     setTimeout(function() { var o = document.getElementById('_loading_ov'); if (o) o.remove(); }, 250);
   } catch (err) {
