@@ -291,6 +291,14 @@ tbody tr:hover .var-pct{color:var(--txt2)}
 .lb-dt{background:rgba(139,148,158,.12);color:var(--txt3)}
 .tog{display:inline-block;width:14px;font-size:9px;color:var(--txt3);vertical-align:middle}
 
+/* ── Period badge dropdown ── */
+.period-badge-dd{transition:border-color .15s}
+.period-badge-dd:hover{border-color:var(--acc)!important;color:var(--txt)!important}
+.period-dd{position:absolute;top:calc(100% + 6px);left:50%;transform:translateX(-50%);background:var(--surf2);border:1px solid var(--acc);border-radius:8px;z-index:700;box-shadow:0 8px 28px rgba(0,0,0,.55);overflow:hidden;min-width:140px;padding:4px 0}
+.period-dd-item{padding:5px 14px;font-size:11px;cursor:pointer;color:var(--txt2);font-family:var(--font);white-space:nowrap;transition:background .1s}
+.period-dd-item:hover{background:var(--surf3);color:var(--txt)}
+.period-dd-item.active{color:var(--acc);font-weight:700;background:rgba(47,129,247,.08)}
+.period-dd-sep{height:1px;background:var(--bdr);margin:4px 0}
 </style>
 </head>
 <body>
@@ -298,8 +306,11 @@ tbody tr:hover .var-pct{color:var(--txt2)}
   <div style="display:flex;align-items:center;gap:14px">
     <div class="logo">Deloitte<span class="dot">.</span></div>
     <div style="width:1px;height:22px;background:#333"></div>
-    <div class="badge grey" style="background:#1a1a1a;color:#888;border:1px solid #333">FY26</div>
-    <div class="badge grey" style="background:#1a1a1a;color:#888;border:1px solid #333">YTD P1&#8211;P13</div>
+    <div class="badge grey" style="background:#1a1a1a;color:#888;border:1px solid #333">FY27</div>
+    <div id="period-badge-topbar" class="badge grey period-badge-dd" style="background:#1a1a1a;color:#888;border:1px solid #333;cursor:pointer;user-select:none;position:relative" onclick="togglePeriodDropdown(event,'period-dd-topbar')">
+      <span id="period-label-topbar">YTD P1&#8211;P13</span> <span style="font-size:8px;opacity:.7">&#9660;</span>
+      <div id="period-dd-topbar" class="period-dd" style="display:none"></div>
+    </div>
   </div>
   <div class="topbar-r" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
     <div id="theme-switcher"></div>
@@ -331,8 +342,11 @@ tbody tr:hover .var-pct{color:var(--txt2)}
 <div class="sub-header">
   <div style="display:flex;align-items:center;gap:10px">
     <div class="sub-header-title">ITS Cost <span>Report</span> Dashboard</div>
-    <div class="badge">FY26</div>
-    <div class="badge grey">YTD P1&#8211;P13</div>
+    <div class="badge">FY27</div>
+    <div id="period-badge-sub" class="badge grey period-badge-dd" style="cursor:pointer;user-select:none;position:relative" onclick="togglePeriodDropdown(event,'period-dd-sub')">
+      <span id="period-label-sub">YTD P1&#8211;P13</span> <span style="font-size:8px;opacity:.7">&#9660;</span>
+      <div id="period-dd-sub" class="period-dd" style="display:none"></div>
+    </div>
   </div>
   <div style="display:flex;align-items:center;gap:10px">
     <span style="font-size:10px;color:var(--txt3);font-weight:600;text-transform:uppercase;letter-spacing:.4px">Display:</span>
@@ -2877,8 +2891,92 @@ const _HIER_B64 = "1L1rc+M21i76V1iZqplzTsUycQdmf1LbalvdsuWW5HR66q2acjpK4jOOnW27M
   }
 })();
 
+// ── Period Badge Dropdown (cosmetic only — does not affect dashboard data) ──
+(function(){
+  var PERIODS = [
+    {label:'YTD P1\u2013P13', value:'ytd'},
+    null, // separator
+    {label:'P1',  value:'P1'},
+    {label:'P2',  value:'P2'},
+    {label:'P3',  value:'P3'},
+    {label:'P4',  value:'P4'},
+    {label:'P5',  value:'P5'},
+    {label:'P6',  value:'P6'},
+    {label:'P7',  value:'P7'},
+    {label:'P8',  value:'P8'},
+    {label:'P9',  value:'P9'},
+    {label:'P10', value:'P10'},
+    {label:'P11', value:'P11'},
+    {label:'P12', value:'P12'},
+    {label:'P13', value:'P13'}
+  ];
 
+  var _activePeriod = localStorage.getItem('itsDashPeriodLabel') || 'ytd';
 
+  function buildDD(ddId) {
+    var dd = document.getElementById(ddId);
+    if (!dd) return;
+    dd.innerHTML = '';
+    PERIODS.forEach(function(p) {
+      if (!p) {
+        var sep = document.createElement('div');
+        sep.className = 'period-dd-sep';
+        dd.appendChild(sep);
+        return;
+      }
+      var el = document.createElement('div');
+      el.className = 'period-dd-item' + (p.value === _activePeriod ? ' active' : '');
+      el.textContent = p.label;
+      el.addEventListener('click', function(e) {
+        e.stopPropagation();
+        _activePeriod = p.value;
+        localStorage.setItem('itsDashPeriodLabel', p.value);
+        _applyLabel(p.label);
+        _closeAll();
+      });
+      dd.appendChild(el);
+    });
+  }
+
+  function _applyLabel(lbl) {
+    ['period-label-topbar','period-label-sub'].forEach(function(id){
+      var el = document.getElementById(id);
+      if (el) el.innerHTML = lbl.replace('–', '&#8211;');
+    });
+    // refresh both dropdowns so active highlight updates
+    buildDD('period-dd-topbar');
+    buildDD('period-dd-sub');
+  }
+
+  function _closeAll() {
+    document.getElementById('period-dd-topbar').style.display = 'none';
+    document.getElementById('period-dd-sub').style.display = 'none';
+  }
+
+  window.togglePeriodDropdown = function(e, ddId) {
+    e.stopPropagation();
+    var dd = document.getElementById(ddId);
+    var other = ddId === 'period-dd-topbar' ? 'period-dd-sub' : 'period-dd-topbar';
+    document.getElementById(other).style.display = 'none';
+    if (dd.style.display === 'none') {
+      buildDD(ddId);
+      dd.style.display = 'block';
+    } else {
+      dd.style.display = 'none';
+    }
+  };
+
+  // Close on outside click
+  document.addEventListener('click', function(e) {
+    if (!e.target.closest('.period-badge-dd')) _closeAll();
+  });
+
+  // Restore saved label on load
+  var saved = PERIODS.find(function(p){ return p && p.value === _activePeriod; });
+  if (saved) {
+    setTimeout(function(){ _applyLabel(saved.label); }, 100);
+  }
+})();
 
 
 </script>
