@@ -321,6 +321,7 @@ tbody tr:hover .var-pct{color:var(--txt2)}
       <span id="user-avatar-name">Set name</span>
     </div>
     <button class="btn btn-grn" onclick="exportExcel()">&#11015; Export Excel</button>
+    <button class="btn" style="background:rgba(163,113,247,.15);color:var(--pur);border:1px solid rgba(163,113,247,.3)" onclick="takeOverviewSnapshot()" title="Save a snapshot of the Overview tab for end-of-day reference">&#128247; Snapshot</button>
     <button class="btn btn-blue" onclick="document.getElementById('file-input').click()">&#8593; Upload</button>
     <button class="btn btn-ghost" onclick="clearUploadedData()" title="Clear cached upload data and reload" style="font-size:10px">&#10006; Clear Cache</button>
     <input type="file" id="file-input" accept=".xlsx,.csv" onchange="handleUpload(event)">
@@ -367,7 +368,32 @@ tbody tr:hover .var-pct{color:var(--txt2)}
     <span id="saved-by-display" class="saved-by" style="display:none"></span>
   </div>
 </div>
-<!-- Activity Log Modal -->
+<!-- Snapshot Modal -->
+<div class="user-modal-overlay" id="snapshot-modal-overlay" style="display:none" onclick="if(event.target===this)closeSnapshotModal()">
+  <div class="user-modal" style="width:520px;max-width:96vw;max-height:90vh;display:flex;flex-direction:column">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-shrink:0">
+      <div class="user-modal-title" style="margin-bottom:0">&#128247; Overview Snapshots</div>
+      <button class="btn btn-ghost" onclick="closeSnapshotModal()" style="padding:3px 10px;font-size:11px">&#10005;</button>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:12px;flex-shrink:0">
+      <button class="btn btn-blue" style="flex:1" onclick="saveSnapshot()">&#43; Save New Snapshot</button>
+    </div>
+    <div id="snapshot-list" style="flex:1;overflow-y:auto;min-height:120px"></div>
+  </div>
+</div>
+<!-- Snapshot Detail View -->
+<div class="user-modal-overlay" id="snapshot-detail-overlay" style="display:none" onclick="if(event.target===this)closeSnapshotDetail()">
+  <div style="background:var(--surf);border:1px solid var(--bdr);border-radius:12px;width:90vw;max-width:1200px;max-height:90vh;display:flex;flex-direction:column;padding:20px;box-shadow:0 16px 48px rgba(0,0,0,.6)">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-shrink:0">
+      <div id="snapshot-detail-title" style="font-size:14px;font-weight:700"></div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-ghost" onclick="exportSnapshotPDF()" style="font-size:11px;background:rgba(248,81,73,.1);color:var(--red);border-color:rgba(248,81,73,.3)">&#128196; Export PDF</button>
+        <button class="btn btn-ghost" onclick="closeSnapshotDetail()" style="padding:3px 10px;font-size:11px">&#10005; Close</button>
+      </div>
+    </div>
+    <div id="snapshot-detail-body" style="flex:1;overflow:auto;font-size:12px"></div>
+  </div>
+</div>
 <div class="user-modal-overlay" id="activity-modal-overlay" style="display:none" onclick="if(event.target===this)closeActivityLog()">
   <div class="user-modal" style="width:480px;max-width:95vw">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
@@ -815,6 +841,366 @@ function clearUploadedData(){
 }
 
 // ---------- helpers ----------
+
+// ===== OVERVIEW SNAPSHOTS =====
+var _currentSnapshotDetail = null;
+var MAX_SNAPSHOTS = 30;
+
+function _getSnapshots(){
+  try{ return JSON.parse(localStorage.getItem('its_ov_snapshots')||'[]'); }catch(e){ return []; }
+}
+function _saveSnapshots(arr){
+  localStorage.setItem('its_ov_snapshots', JSON.stringify(arr));
+}
+
+function takeOverviewSnapshot(){
+  var d=getPrelim();
+  if(!d.length){ showToast('No data to snapshot',true); return; }
+  var now=new Date();
+  var label=now.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})+' '+now.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
+  var author=(typeof getCurrentUser==='function')?getCurrentUser():'Unknown';
+  // Capture KPI values
+  var tAct=sum(d,'act'),tPlan=sum(d,'plan'),tFcst=sum(d,'fcst'),avp=tAct-tPlan,avf=tAct-tFcst;
+  // Capture subgroup summary table data
+  var bySG=grpBy(d,'sg');
+  var sgRows=[];
+  var grpOrder=[],grpSGMap={};
+  d.forEach(function(r){ if(!grpSGMap[r.grp]){grpSGMap[r.grp]=[];grpOrder.push(r.grp);} if(grpSGMap[r.grp].indexOf(r.sg)<0)grpSGMap[r.grp].push(r.sg); });
+  grpOrder=grpOrder.filter(function(v,i,a){return a.indexOf(v)===i;});
+  grpOrder.forEach(function(grp){
+    grpSGMap[grp].forEach(function(sg){
+      var rows=bySG[sg]||[];
+      var sAct=sum(rows,'act'),sPlan=sum(rows,'plan'),sFcst=sum(rows,'fcst');
+      var safeSG=sg.replace(/[^a-zA-Z0-9]/g,'_');
+      var accVal=parseFloat(STORE.acc['OV|'+safeSG]||0)||0;
+      var cmtKey='OV|cmt|'+safeSG; var cmt=STORE.ovc?STORE.ovc[cmtKey]||'':'';
+      sgRows.push({grp:grp,sg:sg,act:sAct,plan:sPlan,fcst:sFcst,avp:sAct-sPlan,avf:sAct-sFcst,acc:accVal,pvAdj:(sAct-sFcst)+accVal,cmt:cmt});
+    });
+  });
+  // Capture ETP
+  var etpData={};
+  var VD_GROUPS=['Telecom USI','Telecom US','ITS Other Costs','Travel','Entertainment','Meetings'];
+  VD_GROUPS.forEach(function(sg){
+    var safeSG=sg.replace(/[^a-zA-Z0-9]/g,'_');
+    var entries=[];try{entries=JSON.parse(STORE.etp['etp|'+safeSG]||'[]');}catch(e){}
+    etpData[sg]=entries;
+  });
+  // Capture VD
+  var vdData={};
+  VD_GROUPS.forEach(function(sg){
+    var safeSG=sg.replace(/[^a-zA-Z0-9]/g,'_');
+    var drivers=[];try{drivers=JSON.parse(STORE.vd['vd|'+safeSG]||'[]');}catch(e){}
+    vdData[sg]=drivers;
+  });
+  // Capture active filters
+  var filterSnap={};
+  Object.keys(SEL).forEach(function(k){ filterSnap[k]=Array.from(SEL[k]); });
+
+  var snap={
+    id: Date.now(),
+    label: label,
+    author: author,
+    ts: now.toISOString(),
+    kpi: {tAct:tAct,tPlan:tPlan,tFcst:tFcst,avp:avp,avf:avf},
+    sgRows: sgRows,
+    etp: etpData,
+    vd: vdData,
+    filters: filterSnap,
+    unit: UNIT_MODE
+  };
+  var snaps=_getSnapshots();
+  snaps.unshift(snap);
+  if(snaps.length>MAX_SNAPSHOTS) snaps=snaps.slice(0,MAX_SNAPSHOTS);
+  _saveSnapshots(snaps);
+  showToast('✓ Snapshot saved: '+label);
+  // Open snapshot modal so user can see it
+  openSnapshotModal();
+}
+
+function openSnapshotModal(){
+  document.getElementById('snapshot-modal-overlay').style.display='flex';
+  renderSnapshotList();
+}
+function closeSnapshotModal(){
+  document.getElementById('snapshot-modal-overlay').style.display='none';
+}
+function closeSnapshotDetail(){
+  document.getElementById('snapshot-detail-overlay').style.display='none';
+  _currentSnapshotDetail=null;
+}
+
+function renderSnapshotList(){
+  var snaps=_getSnapshots();
+  var el=document.getElementById('snapshot-list');
+  if(!el) return;
+  if(!snaps.length){
+    el.innerHTML='<div style="padding:20px;text-align:center;color:var(--txt3);font-size:12px">No snapshots yet. Click <strong style="color:var(--acc)">Save New Snapshot</strong> on the Overview tab to capture the current state.</div>';
+    return;
+  }
+  el.innerHTML=snaps.map(function(s,i){
+    return '<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--bdr2);'+(i===0?'background:rgba(47,129,247,.05)':'')+'">'
+      +'<div style="flex:1;min-width:0">'
+        +'<div style="font-size:12px;font-weight:600;color:var(--txt)">'+escHtml(s.label)+'</div>'
+        +'<div style="font-size:10px;color:var(--txt3);margin-top:2px">by '+escHtml(s.author||'Unknown')+(i===0?' &nbsp;<span style="color:var(--grn);font-weight:600">Latest</span>':'')+'</div>'
+        +'<div style="font-size:10px;color:var(--txt2);margin-top:3px;font-family:var(--mono)">Act: '+_snapFmt(s.kpi.tAct,s.unit)+'&nbsp;·&nbsp;vs Plan: <span style="color:'+(s.kpi.avp>0?'var(--red)':'var(--grn)')+'">'+_snapFmt(s.kpi.avp,s.unit)+'</span>&nbsp;·&nbsp;vs Fcst: <span style="color:'+(s.kpi.avf>0?'var(--red)':'var(--grn)')+'">'+_snapFmt(s.kpi.avf,s.unit)+'</span></div>'
+      +'</div>'
+      +'<div style="display:flex;gap:6px;flex-shrink:0">'
+        +'<button class="btn btn-ghost" style="font-size:10px;padding:3px 10px" onclick="viewSnapshot('+s.id+')">&#128065; View</button>'
+        +'<button class="btn btn-ghost" style="font-size:10px;padding:3px 8px;color:var(--red);border-color:rgba(248,81,73,.3)" onclick="deleteSnapshot('+s.id+')">&#10005;</button>'
+      +'</div>'
+    +'</div>';
+  }).join('');
+}
+
+function _snapFmt(v,unit){
+  if(v==null) return '--';
+  if(unit==='m'){ var m=v/1000000; return (m<0?'('+Math.abs(m).toFixed(1)+'M)':m.toFixed(1)+'M'); }
+  if(unit==='abs'){ var r=Math.round(v); return r<0?'('+Math.abs(r).toLocaleString('en-US')+')':r.toLocaleString('en-US'); }
+  var k=Math.round(v/1000*10)/10; return k<0?'('+Math.abs(k).toFixed(1)+'K)':k.toFixed(1)+'K';
+}
+
+function deleteSnapshot(id){
+  var snaps=_getSnapshots().filter(function(s){return s.id!==id;});
+  _saveSnapshots(snaps);
+  renderSnapshotList();
+  showToast('Snapshot deleted');
+}
+
+function viewSnapshot(id){
+  var snap=_getSnapshots().find(function(s){return s.id===id;});
+  if(!snap) return;
+  _currentSnapshotDetail=snap;
+  document.getElementById('snapshot-detail-title').innerHTML='&#128247; Snapshot: <span style="color:var(--acc)">'+escHtml(snap.label)+'</span>'+(snap.author?' &mdash; <span style="color:var(--txt3);font-size:11px;font-weight:400">by '+escHtml(snap.author)+'</span>':'');
+  var html='';
+  // KPI summary
+  var k=snap.kpi;
+  html+='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:16px">';
+  var kpis=[
+    {lbl:'Total Actuals',val:_snapFmt(k.tAct,snap.unit),color:'var(--acc)'},
+    {lbl:'Total Plan',val:_snapFmt(k.tPlan,snap.unit),color:'var(--txt2)'},
+    {lbl:'Total Forecast',val:_snapFmt(k.tFcst,snap.unit),color:'var(--txt2)'},
+    {lbl:'Act vs Plan',val:_snapFmt(k.avp,snap.unit),color:k.avp>500?'var(--red)':k.avp<-500?'var(--grn)':'var(--txt3)'},
+    {lbl:'Act vs Forecast',val:_snapFmt(k.avf,snap.unit),color:k.avf>500?'var(--red)':k.avf<-500?'var(--grn)':'var(--txt3)'}
+  ];
+  kpis.forEach(function(kp){
+    html+='<div style="background:var(--surf2);border:1px solid var(--bdr);border-radius:8px;padding:12px">'
+      +'<div style="font-size:10px;color:var(--txt3);font-weight:600;text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px">'+kp.lbl+'</div>'
+      +'<div style="font-size:18px;font-weight:700;font-family:var(--mono);color:'+kp.color+'">'+kp.val+'</div>'
+    +'</div>';
+  });
+  html+='</div>';
+  // Subgroup summary table
+  html+='<div style="font-size:12px;font-weight:700;margin-bottom:8px;color:var(--txt)">Account Subgroup Summary</div>';
+  html+='<div style="overflow-x:auto;margin-bottom:18px"><table style="width:100%;border-collapse:collapse">'
+    +'<thead><tr style="background:var(--surf2)">'
+    +'<th style="text-align:left;padding:7px 10px;font-size:10px;color:var(--txt2);border-bottom:1px solid var(--bdr);white-space:nowrap">Sub Group</th>'
+    +'<th style="text-align:right;padding:7px 10px;font-size:10px;color:var(--txt2);border-bottom:1px solid var(--bdr)">Actuals</th>'
+    +'<th style="text-align:right;padding:7px 10px;font-size:10px;color:var(--txt2);border-bottom:1px solid var(--bdr)">Plan</th>'
+    +'<th style="text-align:right;padding:7px 10px;font-size:10px;color:var(--txt2);border-bottom:1px solid var(--bdr)">Forecast</th>'
+    +'<th style="text-align:right;padding:7px 10px;font-size:10px;color:var(--txt2);border-bottom:1px solid var(--bdr)">Act vs Plan</th>'
+    +'<th style="text-align:right;padding:7px 10px;font-size:10px;color:var(--txt2);border-bottom:1px solid var(--bdr)">Act vs Fcst</th>'
+    +'<th style="text-align:right;padding:7px 10px;font-size:10px;color:var(--yel);border-bottom:1px solid var(--bdr)">Accruals</th>'
+    +'<th style="text-align:right;padding:7px 10px;font-size:10px;color:var(--pur);border-bottom:1px solid var(--bdr)">Proj Var Post Adj</th>'
+    +'<th style="text-align:left;padding:7px 10px;font-size:10px;color:var(--txt2);border-bottom:1px solid var(--bdr)">Comments</th>'
+    +'</tr></thead><tbody>';
+  snap.sgRows.forEach(function(r){
+    var avpCls=r.avp>500?'color:var(--red)':r.avp<-500?'color:var(--grn)':'color:var(--txt3)';
+    var avfCls=r.avf>500?'color:var(--red)':r.avf<-500?'color:var(--grn)':'color:var(--txt3)';
+    var pvCls=r.pvAdj>500?'color:var(--red)':r.pvAdj<-500?'color:var(--grn)':'color:var(--txt3)';
+    html+='<tr style="border-bottom:1px solid var(--bdr2)">'
+      +'<td style="padding:6px 10px;font-size:11px;font-weight:600;color:var(--txt)">'+escHtml(r.sg)+'</td>'
+      +'<td style="padding:6px 10px;text-align:right;font-family:var(--mono);font-size:11px">'+_snapFmt(r.act,snap.unit)+'</td>'
+      +'<td style="padding:6px 10px;text-align:right;font-family:var(--mono);font-size:11px;color:var(--txt2)">'+_snapFmt(r.plan,snap.unit)+'</td>'
+      +'<td style="padding:6px 10px;text-align:right;font-family:var(--mono);font-size:11px;color:var(--txt2)">'+_snapFmt(r.fcst,snap.unit)+'</td>'
+      +'<td style="padding:6px 10px;text-align:right;font-family:var(--mono);font-size:11px;'+avpCls+'">'+_snapFmt(r.avp,snap.unit)+'</td>'
+      +'<td style="padding:6px 10px;text-align:right;font-family:var(--mono);font-size:11px;'+avfCls+'">'+_snapFmt(r.avf,snap.unit)+'</td>'
+      +'<td style="padding:6px 10px;text-align:right;font-family:var(--mono);font-size:11px;color:var(--yel)">'+_snapFmt(r.acc,snap.unit)+'</td>'
+      +'<td style="padding:6px 10px;text-align:right;font-family:var(--mono);font-size:11px;'+pvCls+'">'+_snapFmt(r.pvAdj,snap.unit)+'</td>'
+      +'<td style="padding:6px 10px;font-size:11px;color:var(--txt2)">'+escHtml(r.cmt||'')+'</td>'
+    +'</tr>';
+  });
+  html+='</tbody></table></div>';
+  // ETP section
+  html+='<div style="font-size:12px;font-weight:700;margin-bottom:8px;color:var(--txt)">Entries to be Posted</div>';
+  html+='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;margin-bottom:18px">';
+  Object.keys(snap.etp||{}).forEach(function(sg){
+    var entries=snap.etp[sg]||[];
+    var total=entries.reduce(function(s,e){return s+(parseFloat(e.amt)||0);},0);
+    html+='<div style="background:var(--surf2);border:1px solid var(--bdr);border-radius:8px;overflow:hidden">'
+      +'<div style="padding:8px 12px;border-bottom:1px solid var(--bdr);font-size:11px;font-weight:700;color:var(--txt)">'+escHtml(sg)+'</div>'
+      +'<table style="width:100%;border-collapse:collapse">'
+      +'<thead><tr><th style="text-align:left;padding:5px 8px;font-size:9px;color:var(--txt3);border-bottom:1px solid var(--bdr2)">Entry</th><th style="text-align:right;padding:5px 8px;font-size:9px;color:var(--txt3);border-bottom:1px solid var(--bdr2)">Amount</th></tr></thead><tbody>';
+    entries.forEach(function(e){
+      if(!e.entry&&!parseFloat(e.amt)) return;
+      html+='<tr><td style="padding:4px 8px;font-size:10px;color:var(--txt2)">'+escHtml(e.entry||'—')+'</td><td style="padding:4px 8px;text-align:right;font-family:var(--mono);font-size:10px;color:var(--txt2)">'+_snapFmt(parseFloat(e.amt)||0,'abs')+'</td></tr>';
+    });
+    html+='</tbody><tfoot><tr style="background:var(--surf3)"><td style="padding:5px 8px;font-size:10px;font-weight:700;color:var(--txt)">Total</td><td style="padding:5px 8px;text-align:right;font-family:var(--mono);font-size:10px;font-weight:700;color:'+(total>0?'var(--red)':total<0?'var(--grn)':'var(--txt3)')+'">'+_snapFmt(total,'abs')+'</td></tr></tfoot></table></div>';
+  });
+  html+='</div>';
+  // VD section
+  html+='<div style="font-size:12px;font-weight:700;margin-bottom:8px;color:var(--txt)">Variance Driving Factors</div>';
+  html+='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px">';
+  Object.keys(snap.vd||{}).forEach(function(sg){
+    var drivers=snap.vd[sg]||[];
+    var dSum=drivers.reduce(function(s,d){return s+(parseFloat(d.amt)||0);},0);
+    html+='<div style="background:var(--surf2);border:1px solid var(--bdr);border-radius:8px;overflow:hidden">'
+      +'<div style="padding:8px 12px;border-bottom:1px solid var(--bdr);font-size:11px;font-weight:700;color:var(--txt)">'+escHtml(sg)+'</div>'
+      +'<table style="width:100%;border-collapse:collapse"><thead><tr><th style="text-align:left;padding:5px 8px;font-size:9px;color:var(--txt3);border-bottom:1px solid var(--bdr2)">Driver</th><th style="text-align:right;padding:5px 8px;font-size:9px;color:var(--txt3);border-bottom:1px solid var(--bdr2)">Amount</th></tr></thead><tbody>';
+    drivers.forEach(function(dr){
+      if(!dr.name&&!parseFloat(dr.amt)) return;
+      html+='<tr><td style="padding:4px 8px;font-size:10px;color:var(--txt2)">'+escHtml(dr.name||'—')+'</td><td style="padding:4px 8px;text-align:right;font-family:var(--mono);font-size:10px;color:var(--txt2)">'+_snapFmt(parseFloat(dr.amt)||0,'abs')+'</td></tr>';
+    });
+    html+='</tbody><tfoot><tr style="background:var(--surf3)"><td style="padding:5px 8px;font-size:10px;font-weight:700;color:var(--txt)">Sum of Drivers</td><td style="padding:5px 8px;text-align:right;font-family:var(--mono);font-size:10px;font-weight:700;color:'+(dSum>0?'var(--red)':dSum<0?'var(--grn)':'var(--txt3)')+'">'+_snapFmt(dSum,'abs')+'</td></tr></tfoot></table></div>';
+  });
+  html+='</div>';
+  document.getElementById('snapshot-detail-body').innerHTML=html;
+  document.getElementById('snapshot-detail-overlay').style.display='flex';
+}
+
+function exportSnapshotExcel(){
+  var snap=_currentSnapshotDetail;
+  if(!snap) return;
+  if(typeof XLSX==='undefined'){
+    var s=document.createElement('script');
+    s.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+    s.onload=function(){ _doExportSnapshotExcel(snap); };
+    document.head.appendChild(s);
+  } else { _doExportSnapshotExcel(snap); }
+}
+function _doExportSnapshotExcel(snap){
+  var wb=XLSX.utils.book_new();
+  // Sheet 1: Subgroup Summary
+  var s1=[['Snapshot','Account Sub Group','Actuals','Plan','Forecast','Act vs Plan','Act vs Fcst','Accruals/Reversals','Proj Var Post Adj','Comments']];
+  snap.sgRows.forEach(function(r){ s1.push([snap.label,r.sg,r.act,r.plan,r.fcst,r.avp,r.avf,r.acc,r.pvAdj,r.cmt||'']); });
+  var ws1=XLSX.utils.aoa_to_sheet(s1); ws1['!cols']=[{wch:22},{wch:22},{wch:14},{wch:14},{wch:14},{wch:14},{wch:14},{wch:18},{wch:18},{wch:35}];
+  XLSX.utils.book_append_sheet(wb,ws1,'Overview Summary');
+  // Sheet 2: ETP
+  var s2=[['Account Sub Group','Expected Entry','Amount']];
+  Object.keys(snap.etp||{}).forEach(function(sg){
+    var entries=snap.etp[sg]||[];
+    var total=entries.reduce(function(s,e){return s+(parseFloat(e.amt)||0);},0);
+    entries.forEach(function(e,i){ if(e.entry||parseFloat(e.amt)) s2.push([i===0?sg:'',e.entry||'',parseFloat(e.amt)||0]); });
+    s2.push(['','Grand Total',total]); s2.push(['','','']);
+  });
+  var ws2=XLSX.utils.aoa_to_sheet(s2); ws2['!cols']=[{wch:22},{wch:35},{wch:14}];
+  XLSX.utils.book_append_sheet(wb,ws2,'Entries to be Posted');
+  // Sheet 3: VD
+  var s3=[['Account Sub Group','Variance Driver','Amount']];
+  Object.keys(snap.vd||{}).forEach(function(sg){
+    var drivers=snap.vd[sg]||[];
+    var dSum=drivers.reduce(function(s,d){return s+(parseFloat(d.amt)||0);},0);
+    drivers.forEach(function(dr,i){ if(dr.name||parseFloat(dr.amt)) s3.push([i===0?sg:'',dr.name||'',parseFloat(dr.amt)||0]); });
+    s3.push(['','Sum of Drivers',dSum]); s3.push(['','','']);
+  });
+  var ws3=XLSX.utils.aoa_to_sheet(s3); ws3['!cols']=[{wch:22},{wch:35},{wch:14}];
+  XLSX.utils.book_append_sheet(wb,ws3,'Variance Drivers');
+  XLSX.writeFile(wb,'ITS_Snapshot_'+snap.label.replace(/[^a-zA-Z0-9]/g,'_')+'.xlsx');
+}
+
+function exportSnapshotPDF(){
+  var snap=_currentSnapshotDetail;
+  if(!snap) return;
+
+  // Build a clean print-friendly HTML document and open in new window for Save as PDF
+  var css=[
+    'body{font-family:Arial,sans-serif;font-size:11px;color:#111;margin:24px;background:#fff}',
+    'h1{font-size:15px;font-weight:700;margin-bottom:2px;color:#0a2342}',
+    'h2{font-size:12px;font-weight:700;margin:18px 0 6px;color:#0a2342;border-bottom:1px solid #c8d0da;padding-bottom:4px}',
+    '.meta{font-size:10px;color:#666;margin-bottom:16px}',
+    '.kpi-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:18px}',
+    '.kpi-box{border:1px solid #c8d0da;border-radius:6px;padding:10px 12px;background:#f8f9fb}',
+    '.kpi-lbl{font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;color:#666;margin-bottom:4px}',
+    '.kpi-val{font-size:16px;font-weight:700;color:#0a2342}',
+    '.kpi-val.pos{color:#cf1322}.kpi-val.neg{color:#237804}',
+    'table{width:100%;border-collapse:collapse;margin-bottom:14px;font-size:10px}',
+    'thead th{background:#f0f2f5;font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.3px;color:#555;padding:6px 8px;border:1px solid #dde2ea;text-align:right}',
+    'thead th.lft{text-align:left}',
+    'tbody td{padding:5px 8px;border:1px solid #e8ecf0;text-align:right;color:#333}',
+    'tbody td.lft{text-align:left;font-weight:600;color:#0a2342}',
+    'tbody tr:nth-child(even){background:#fafbfc}',
+    'tfoot td{padding:5px 8px;border:1px solid #dde2ea;text-align:right;font-weight:700;background:#f0f2f5}',
+    'tfoot td.lft{text-align:left}',
+    '.section-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px}',
+    '.card{border:1px solid #c8d0da;border-radius:6px;overflow:hidden}',
+    '.card-hdr{padding:7px 10px;background:#f0f2f5;font-size:10px;font-weight:700;color:#0a2342;border-bottom:1px solid #c8d0da}',
+    '.card table{margin-bottom:0}',
+    '.pos{color:#cf1322}.neg{color:#237804}.neu{color:#888}',
+    '@media print{body{margin:12px}@page{margin:15mm}}'
+  ].join('\n');
+
+  function sFmt(v){ return _snapFmt(v,snap.unit); }
+  function vc2(v){ return v>500?'pos':v<-500?'neg':'neu'; }
+
+  // KPI boxes
+  var k=snap.kpi;
+  var kpiHtml='<div class="kpi-grid">';
+  [{lbl:'Total Actuals',v:k.tAct,neu:true},{lbl:'Total Plan',v:k.tPlan,neu:true},{lbl:'Total Forecast',v:k.tFcst,neu:true},{lbl:'Act vs Plan',v:k.avp},{lbl:'Act vs Forecast',v:k.avf}]
+    .forEach(function(kp){ kpiHtml+='<div class="kpi-box"><div class="kpi-lbl">'+kp.lbl+'</div><div class="kpi-val '+(kp.neu?'':''+vc2(kp.v))+'">'+sFmt(kp.v)+'</div></div>'; });
+  kpiHtml+='</div>';
+
+  // Subgroup summary table
+  var sgHtml='<table><thead><tr>'
+    +'<th class="lft" style="min-width:130px">Sub Group</th><th>Actuals</th><th>Plan</th><th>Forecast</th><th>Act vs Plan</th><th>Act vs Fcst</th><th>Accruals</th><th>Proj Var Post Adj</th><th class="lft">Comments</th>'
+    +'</tr></thead><tbody>';
+  snap.sgRows.forEach(function(r){
+    sgHtml+='<tr>'
+      +'<td class="lft">'+escHtml(r.sg)+'</td>'
+      +'<td>'+sFmt(r.act)+'</td><td>'+sFmt(r.plan)+'</td><td>'+sFmt(r.fcst)+'</td>'
+      +'<td class="'+vc2(r.avp)+'">'+sFmt(r.avp)+'</td>'
+      +'<td class="'+vc2(r.avf)+'">'+sFmt(r.avf)+'</td>'
+      +'<td style="color:#b37400">'+sFmt(r.acc)+'</td>'
+      +'<td class="'+vc2(r.pvAdj)+'">'+sFmt(r.pvAdj)+'</td>'
+      +'<td class="lft" style="color:#555">'+escHtml(r.cmt||'')+'</td>'
+    +'</tr>';
+  });
+  sgHtml+='</tbody></table>';
+
+  // ETP cards
+  var etpHtml='<div class="section-grid">';
+  Object.keys(snap.etp||{}).forEach(function(sg){
+    var entries=(snap.etp[sg]||[]).filter(function(e){return e.entry||parseFloat(e.amt);});
+    var total=entries.reduce(function(s,e){return s+(parseFloat(e.amt)||0);},0);
+    etpHtml+='<div class="card"><div class="card-hdr">'+escHtml(sg)+'</div>'
+      +'<table><thead><tr><th class="lft">Expected Entry</th><th>Amount ($)</th></tr></thead><tbody>';
+    if(entries.length){ entries.forEach(function(e){ etpHtml+='<tr><td class="lft">'+escHtml(e.entry||'—')+'</td><td>'+_snapFmt(parseFloat(e.amt)||0,'abs')+'</td></tr>'; }); }
+    else { etpHtml+='<tr><td class="lft" style="color:#aaa;font-style:italic">No entries</td><td>—</td></tr>'; }
+    etpHtml+='</tbody><tfoot><tr><td class="lft">Grand Total</td><td class="'+vc2(total)+'">'+_snapFmt(total,'abs')+'</td></tr></tfoot></table></div>';
+  });
+  etpHtml+='</div>';
+
+  // VD cards
+  var vdHtml='<div class="section-grid">';
+  Object.keys(snap.vd||{}).forEach(function(sg){
+    var drivers=(snap.vd[sg]||[]).filter(function(d){return d.name||parseFloat(d.amt);});
+    var dSum=drivers.reduce(function(s,d){return s+(parseFloat(d.amt)||0);},0);
+    vdHtml+='<div class="card"><div class="card-hdr">'+escHtml(sg)+'</div>'
+      +'<table><thead><tr><th class="lft">Variance Driver</th><th>Amount ($)</th></tr></thead><tbody>';
+    if(drivers.length){ drivers.forEach(function(dr){ vdHtml+='<tr><td class="lft">'+escHtml(dr.name||'—')+'</td><td>'+_snapFmt(parseFloat(dr.amt)||0,'abs')+'</td></tr>'; }); }
+    else { vdHtml+='<tr><td class="lft" style="color:#aaa;font-style:italic">No drivers</td><td>—</td></tr>'; }
+    vdHtml+='</tbody><tfoot><tr><td class="lft">Sum of Drivers</td><td class="'+vc2(dSum)+'">'+_snapFmt(dSum,'abs')+'</td></tr></tfoot></table></div>';
+  });
+  vdHtml+='</div>';
+
+  var fullHtml='<!DOCTYPE html><html><head><meta charset="UTF-8">'
+    +'<title>ITS Snapshot — '+escHtml(snap.label)+'</title>'
+    +'<style>'+css+'</style></head><body>'
+    +'<h1>ITS Cost Report &mdash; Overview Snapshot</h1>'
+    +'<div class="meta">'+escHtml(snap.label)+(snap.author?' &nbsp;|&nbsp; By: '+escHtml(snap.author):'')+'&nbsp;|&nbsp; Unit: '+(snap.unit==='m'?'$M':snap.unit==='abs'?'$':'$K')+'</div>'
+    +kpiHtml
+    +'<h2>Account Subgroup Summary</h2>'+sgHtml
+    +'<h2>Entries to be Posted</h2>'+etpHtml
+    +'<h2>Variance Driving Factors</h2>'+vdHtml
+    +'</body></html>';
+
+  var win=window.open('','_blank','width=1100,height=800');
+  if(!win){ alert('Please allow popups to export PDF. Then use File → Print → Save as PDF.'); return; }
+  win.document.write(fullHtml);
+  win.document.close();
+  // Trigger print dialog so user can save as PDF
+  win.onload=function(){ win.focus(); win.print(); };
+  setTimeout(function(){ try{ win.focus(); win.print(); }catch(e){} }, 600);
+}
+// ===== END SNAPSHOTS =====
 
 function setSyncStatus(state){
   var dot=document.getElementById('sync-dot'), txt=document.getElementById('sync-txt');
@@ -1378,11 +1764,36 @@ function renderPrelim(){
     Object.keys(bySG).forEach(function(sg){
       var sgR=bySG[sg],bySA=grpBy(sgR,'sa');
       var tA=sum(sgR,'act'),tP=sum(sgR,'plan'),tF=sum(sgR,'fcst');
-      html+='<div class="tbl-wrap"><div class="tbl-hdr"><div class="tbl-title">'+sg+'</div><div class="tbl-pill">'+grp+'</div></div><div class="tbl-scroll"><table><thead><tr><th class="sticky lft" style="min-width:180px">Service Area</th><th>Actuals</th><th>Plan</th><th>Forecast</th><th>Act vs Plan</th><th>Act vs Fcst</th><th class="lft" style="min-width:260px;color:var(--txt2)">Comments</th></tr></thead><tbody>';
+      html+='<div class="tbl-wrap"><div class="tbl-hdr"><div class="tbl-title">'+sg+'</div><div class="tbl-pill">'+grp+'</div></div><div class="tbl-scroll"><table><colgroup><col style="min-width:180px"><col style="min-width:88px"><col style="min-width:88px"><col style="min-width:88px"><col style="min-width:100px"><col style="min-width:100px"><col style="min-width:260px"></colgroup><thead><tr><th class="sticky lft" style="min-width:180px">Service Area</th><th>Actuals</th><th>Plan</th><th>Forecast</th><th>Act vs Plan</th><th>Act vs Fcst</th><th class="lft" style="min-width:260px;color:var(--txt2)">Comments</th></tr></thead><tbody>';
       Object.keys(bySA).sort().forEach(function(sa){
         var sR=bySA[sa],sA=sum(sR,'act'),sP=sum(sR,'plan'),sF=sum(sR,'fcst'),sAvp=sA-sP,sAvf=sA-sF;
         var k='P|'+sg+'|'+sa;
-        html+='<tr><td class="sticky lft" style="font-size:11px">'+sa+'</td><td>'+fmt(sA)+'</td><td>'+fmt(sP)+'</td><td>'+fmt(sF)+'</td><td class="'+vc(sAvp)+'">'+fmt(sAvp)+'</td><td class="'+vc(sAvf)+'">'+fmt(sAvf)+'</td><td><textarea class="cmt-input" rows="1" placeholder="Add comment..." data-k="'+k.replace(/"/g,'&quot;')+'" onchange="savePrelimCmt(this)" style="width:100%;min-width:240px">'+(STORE.cmt[k]||'')+'</textarea></td></tr>';
+        var saRowId='prelim-sa-'+sg.replace(/[^a-z0-9]/gi,'_')+'-'+sa.replace(/[^a-z0-9]/gi,'_');
+        // GL Description breakdown for this SA
+        var byGLD=grpBy(sR,'gld');
+        var gldKeys=Object.keys(byGLD).filter(function(g){return g;}).sort();
+        var hasGLD=gldKeys.length>0;
+        html+='<tr style="cursor:'+(hasGLD?'pointer':'default')+'" onclick="'+(hasGLD?'togglePrelimGL(\''+saRowId+'\')':'')+'">';
+        html+='<td class="sticky lft" style="font-size:11px">';
+        if(hasGLD) html+='<span id="tog-'+saRowId+'" style="display:inline-block;width:14px;font-size:9px;color:var(--txt3);transition:transform .15s">&#9654;</span>';
+        else html+='<span style="display:inline-block;width:14px"></span>';
+        html+=sa+'</td><td>'+fmt(sA)+'</td><td>'+fmt(sP)+'</td><td>'+fmt(sF)+'</td><td class="'+vc(sAvp)+'">'+fmt(sAvp)+'</td><td class="'+vc(sAvf)+'">'+fmt(sAvf)+'</td><td><textarea class="cmt-input" rows="1" placeholder="Add comment..." data-k="'+k.replace(/"/g,'&quot;')+'" onchange="savePrelimCmt(this)" style="width:100%;min-width:240px">'+(STORE.cmt[k]||'')+'</textarea></td></tr>';
+        if(hasGLD){
+          html+='<tr id="gld-rows-'+saRowId+'" style="display:none"><td colspan="7" style="padding:0;border-bottom:1px solid var(--bdr2)"><table style="width:100%;border-collapse:collapse;background:rgba(47,129,247,0.03)">'+
+            '<colgroup><col style="min-width:180px"><col style="min-width:88px"><col style="min-width:88px"><col style="min-width:88px"><col style="min-width:100px"><col style="min-width:100px"><col style="min-width:260px"></colgroup>';
+          gldKeys.forEach(function(gld){
+            var gR=byGLD[gld],gA=sum(gR,'act'),gP=sum(gR,'plan'),gF=sum(gR,'fcst'),gAvp=gA-gP,gAvf=gA-gF;
+            html+='<tr style="border-bottom:1px solid var(--bdr2)" onmouseover="this.style.background=\'rgba(255,255,255,.02)\'" onmouseout="this.style.background=\'\'">'+
+              '<td class="sticky lft" style="padding:5px 10px 5px 28px;font-size:10px;color:var(--txt2);font-family:var(--font)"><span style="opacity:.4;margin-right:4px">└</span>'+escHtml(gld)+'</td>'+
+              '<td style="text-align:right;padding:5px 10px;font-family:var(--mono);font-size:10px;color:var(--txt2)">'+fmt(gA)+'</td>'+
+              '<td style="text-align:right;padding:5px 10px;font-family:var(--mono);font-size:10px;color:var(--txt2)">'+fmt(gP)+'</td>'+
+              '<td style="text-align:right;padding:5px 10px;font-family:var(--mono);font-size:10px;color:var(--txt2)">'+fmt(gF)+'</td>'+
+              '<td style="text-align:right;padding:5px 10px;font-family:var(--mono);font-size:10px" class="'+vc(gAvp)+'">'+fmt(gAvp)+'</td>'+
+              '<td style="text-align:right;padding:5px 10px;font-family:var(--mono);font-size:10px" class="'+vc(gAvf)+'">'+fmt(gAvf)+'</td>'+
+              '<td style="padding:5px 10px"></td></tr>';
+          });
+          html+='</table></td></tr>';
+        }
       });
       html+='<tr class="tot"><td class="sticky lft">TOTAL</td><td>'+fmt(tA)+'</td><td>'+fmt(tP)+'</td><td>'+fmt(tF)+'</td><td class="'+vc(tA-tP)+'">'+fmt(tA-tP)+'</td><td class="'+vc(tA-tF)+'">'+fmt(tA-tF)+'</td><td></td></tr>';
       html+='</tbody></table></div></div>';
@@ -1428,6 +1839,14 @@ function renderPrelim(){
   el.innerHTML=html;
 }
 function savePrelimCmt(el){var k=el.dataset.k;STORE.cmt[k]=el.value;markDirty();}
+function togglePrelimGL(saRowId){
+  var container=document.getElementById('gld-rows-'+saRowId);
+  var tog=document.getElementById('tog-'+saRowId);
+  if(!container) return;
+  var isOpen=container.style.display!=='none';
+  container.style.display=isOpen?'none':'';
+  if(tog) tog.innerHTML=isOpen?'&#9654;':'&#9660;';
+}
 
 var TREND_VIEW='sg'; // 'sg' or 'sa'
 var PRELIM_TREND_DATA=null;
@@ -1642,7 +2061,7 @@ function buildKPIs(){
       +'<div class="kpi-sub">'+glaEsc(String(sub))+'</div></div>';
   }
   return '<div class="kpi-row">'
-    +glaKpi('P13 Actuals', fmt(total), vc(total), GLA_activeSG)
+    +glaKpi('Actuals', fmt(total), vc(total), GLA_activeSG)
     +glaKpi('Business Areas', fBA.length, '', 'selected')
     +glaKpi('Header Texts', htC, '', 'GL categories')
     +glaKpi('Business Lines', blC, '', 'nodes')
@@ -1767,7 +2186,7 @@ function glaBuildTable(){
   return '<div class="tbl-scroll"><table>'
     +'<thead><tr>'
     +'<th class="sticky lft" style="min-width:320px">Drill-down Hierarchy</th>'
-    +'<th style="min-width:130px">P13 Actuals ($)</th>'
+    +'<th style="min-width:130px">Actuals ($)</th>'
     +'<th style="min-width:70px">% of SG</th>'
     +'</tr></thead>'
     +'<tbody>'+rows+'</tbody>'
@@ -1842,10 +2261,10 @@ function glaRenderTable(){
       '<div class="tbl-hdr" style="border-left:3px solid '+col+'">' +
         '<div>' +
           '<div class="tbl-title" style="color:'+col+'">'+glaEsc(GLA_activeSG)+'</div>' +
-          '<div class="tbl-sub">Drill-down: Business Area ▶ Header Text ▶ Business Line ▶ Line Item ▶ Document Type &nbsp;·&nbsp; P13 FY2026</div>' +
+          '<div class="tbl-sub">Drill-down: Business Area ▶ Header Text ▶ Business Line ▶ Line Item ▶ Document Type</div>' +
         '</div>' +
         '<div style="text-align:right">' +
-          '<div style="font-size:10px;color:var(--txt2);margin-bottom:2px">P13 Total</div>' +
+          '<div style="font-size:10px;color:var(--txt2);margin-bottom:2px">Total</div>' +
           '<div style="font-size:18px;font-weight:700;font-family:var(--mono)" class="'+vc(total)+'">'+fmt(total)+'</div>' +
         '</div>' +
       '</div>' +
@@ -2180,9 +2599,11 @@ function sugCard(icon,title,desc,tabId){
 
 // ===== VARIANCE DRIVERS =====
 function buildVDRow(safeSG,idx,name,amt){
-  return '<tr id="vd-row-'+safeSG+'-'+idx+'"><td><input class="vd-text-inp" type="text" value="'+escHtml(name)+'" placeholder="Enter variance driver..." data-sg="'+safeSG+'" data-idx="'+idx+'" data-field="name" onchange="saveVDField(this)"/></td><td><input class="vd-num-inp" type="number" value="'+escHtml(String(amt))+'" placeholder="0" data-sg="'+safeSG+'" data-idx="'+idx+'" data-field="amt" oninput="vdAmtChange(this)" onchange="saveVDField(this)"/></td><td><button class="vd-del-btn" data-sg="'+safeSG+'" data-idx="'+idx+'" onclick="delVDRow(this.dataset.sg,parseInt(this.dataset.idx))" title="Remove">&#10005;</button></td></tr>';
+  var rawAmt=parseFloat(String(amt||'').replace(/,/g,''))||0;
+  var displayAmt=rawAmt?rawAmt.toLocaleString('en-US'):'';
+  return '<tr id="vd-row-'+safeSG+'-'+idx+'"><td><input class="vd-text-inp" type="text" value="'+escHtml(name)+'" placeholder="Enter variance driver..." data-sg="'+safeSG+'" data-idx="'+idx+'" data-field="name" onchange="saveVDField(this)"/></td><td><input class="vd-num-inp" type="text" inputmode="numeric" value="'+escHtml(displayAmt)+'" placeholder="0" data-sg="'+safeSG+'" data-idx="'+idx+'" data-field="amt" style="text-align:right;width:100%" onfocus="vdFocusAmt(this)" onblur="vdBlurAmt(this)" oninput="vdAmtChange(this)" onchange="saveVDField(this)" data-raw="'+escHtml(String(rawAmt||''))+'"/></td><td><button class="vd-del-btn" data-sg="'+safeSG+'" data-idx="'+idx+'" onclick="delVDRow(this.dataset.sg,parseInt(this.dataset.idx))" title="Remove">&#10005;</button></td></tr>';
 }
-function getVDDrivers(safeSG){var body=document.getElementById('vd-body-'+safeSG);if(!body)return[];return Array.from(body.querySelectorAll('tr')).map(function(row){return{name:row.querySelector('[data-field="name"]').value,amt:row.querySelector('[data-field="amt"]').value};});}
+function getVDDrivers(safeSG){var body=document.getElementById('vd-body-'+safeSG);if(!body)return[];return Array.from(body.querySelectorAll('tr')).map(function(row){return{name:row.querySelector('[data-field="name"]').value,amt:_parseAmtInput(row.querySelector('[data-field="amt"]').dataset.raw||row.querySelector('[data-field="amt"]').value)};});}
 function recalcVD(safeSG){
   var body=document.getElementById('vd-body-'+safeSG);if(!body)return;
   var drivers=getVDDrivers(safeSG),dSum=drivers.reduce(function(s,d){return s+(parseFloat(d.amt)||0);},0);
@@ -2203,16 +2624,24 @@ function recalcVD(safeSG){
   if(te){te.textContent=fmt(grandTotal);te.className=vc(grandTotal);}
   if(ge){ge.textContent=fmt(grandTotal);ge.className=vc(grandTotal);}
 }
-function vdAmtChange(inp){recalcVD(inp.dataset.sg);}
+function vdAmtChange(inp){ inp.dataset.raw=String(_parseAmtInput(inp.value)||inp.value); recalcVD(inp.dataset.sg); }
 function saveVDField(inp){var safeSG=inp.dataset.sg,drivers=getVDDrivers(safeSG);STORE.vd['vd|'+safeSG]=JSON.stringify(drivers);markDirty();recalcVD(safeSG);}
-function addVDRow(safeSG){var body=document.getElementById('vd-body-'+safeSG);if(!body)return;var newIdx=body.querySelectorAll('tr').length;var row=document.createElement('tr');row.id='vd-row-'+safeSG+'-'+newIdx;row.innerHTML='<td><input class="vd-text-inp" type="text" value="" placeholder="Enter variance driver..." data-sg="'+safeSG+'" data-idx="'+newIdx+'" data-field="name" onchange="saveVDField(this)"/></td><td><input class="vd-num-inp" type="number" value="" placeholder="0" data-sg="'+safeSG+'" data-idx="'+newIdx+'" data-field="amt" oninput="vdAmtChange(this)" onchange="saveVDField(this)"/></td><td><button class="vd-del-btn" data-sg="'+safeSG+'" data-idx="'+newIdx+'" onclick="delVDRow(this.dataset.sg,parseInt(this.dataset.idx))" title="Remove">&#10005;</button></td>';body.appendChild(row);markDirty();}
+function addVDRow(safeSG){var body=document.getElementById('vd-body-'+safeSG);if(!body)return;var newIdx=body.querySelectorAll('tr').length;var row=document.createElement('tr');row.id='vd-row-'+safeSG+'-'+newIdx;row.innerHTML='<td><input class="vd-text-inp" type="text" value="" placeholder="Enter variance driver..." data-sg="'+safeSG+'" data-idx="'+newIdx+'" data-field="name" onchange="saveVDField(this)"/></td><td><input class="vd-num-inp" type="text" inputmode="numeric" value="" placeholder="0" data-sg="'+safeSG+'" data-idx="'+newIdx+'" data-field="amt" style="text-align:right;width:100%" onfocus="vdFocusAmt(this)" onblur="vdBlurAmt(this)" oninput="vdAmtChange(this)" onchange="saveVDField(this)" data-raw=""/></td><td><button class="vd-del-btn" data-sg="'+safeSG+'" data-idx="'+newIdx+'" onclick="delVDRow(this.dataset.sg,parseInt(this.dataset.idx))" title="Remove">&#10005;</button></td>';body.appendChild(row);markDirty();}
 function delVDRow(safeSG,idx){var body=document.getElementById('vd-body-'+safeSG);if(!body)return;var rows=Array.from(body.querySelectorAll('tr'));if(rows.length<=1)return;if(rows[idx])body.removeChild(rows[idx]);Array.from(body.querySelectorAll('tr')).forEach(function(row,i){row.id='vd-row-'+safeSG+'-'+i;row.querySelectorAll('input').forEach(function(inp){inp.dataset.idx=i;});var btn=row.querySelector('.vd-del-btn');if(btn)btn.dataset.sg=safeSG;btn.dataset.idx=i;btn.onclick=function(){delVDRow(this.dataset.sg,parseInt(this.dataset.idx));};});var drivers=getVDDrivers(safeSG);STORE.vd['vd|'+safeSG]=JSON.stringify(drivers);markDirty();recalcVD(safeSG);}
 
 // ===== ENTRIES TO BE POSTED =====
+function _parseAmtInput(val){ return parseFloat(String(val||'').replace(/,/g,''))||0; }
+function _fmtAmtInput(val){ var n=_parseAmtInput(val); return n===0?'':n.toLocaleString('en-US'); }
+function etpFocusAmt(inp){ inp.value=String(inp.dataset.raw||'').replace(/,/g,''); }
+function etpBlurAmt(inp){ var raw=_parseAmtInput(inp.value); inp.dataset.raw=raw||''; inp.value=raw?raw.toLocaleString('en-US'):''; }
+function vdFocusAmt(inp){ inp.value=String(inp.dataset.raw||'').replace(/,/g,''); }
+function vdBlurAmt(inp){ var raw=_parseAmtInput(inp.value); inp.dataset.raw=raw||''; inp.value=raw?raw.toLocaleString('en-US'):''; recalcVD(inp.dataset.sg); }
 function buildETPRow(safeSG,idx,entry,amt){
+  var rawAmt=parseFloat(String(amt||'').replace(/,/g,''))||0;
+  var displayAmt=rawAmt?rawAmt.toLocaleString('en-US'):'';
   return '<tr id="etp-row-'+safeSG+'-'+idx+'">'+
     '<td><input class="vd-text-inp" type="text" value="'+escHtml(entry)+'" placeholder="Enter expected entry..." data-sg="'+safeSG+'" data-idx="'+idx+'" data-field="entry" onchange="saveETPField(this)"/></td>'+
-    '<td><input class="vd-num-inp" type="number" value="'+escHtml(String(amt))+'" placeholder="0" data-sg="'+safeSG+'" data-idx="'+idx+'" data-field="amt" onchange="saveETPField(this)"/></td>'+
+    '<td style="position:relative"><input class="vd-num-inp" type="text" inputmode="numeric" value="'+escHtml(displayAmt)+'" placeholder="0" data-sg="'+safeSG+'" data-idx="'+idx+'" data-field="amt" style="text-align:right;width:100%" onfocus="etpFocusAmt(this)" onblur="etpBlurAmt(this)" onchange="saveETPField(this)" data-raw="'+escHtml(String(rawAmt||''))+'"/></td>'+
     '<td><button class="vd-del-btn" data-sg="'+safeSG+'" data-idx="'+idx+'" onclick="delETPRow(this.dataset.sg,parseInt(this.dataset.idx))" title="Remove">&#10005;</button></td>'+
   '</tr>';
 }
@@ -2223,7 +2652,7 @@ function getETPEntries(safeSG){
   return Array.from(body.querySelectorAll('tr')).map(function(row){
     return {
       entry: row.querySelector('[data-field="entry"]').value,
-      amt:   row.querySelector('[data-field="amt"]').value
+      amt:   _parseAmtInput(row.querySelector('[data-field="amt"]').dataset.raw||row.querySelector('[data-field="amt"]').value)
     };
   });
 }
@@ -2308,7 +2737,7 @@ function addETPRow(safeSG){
   row.id='etp-row-'+safeSG+'-'+newIdx;
   row.innerHTML=
     '<td><input class="vd-text-inp" type="text" value="" placeholder="Enter expected entry..." data-sg="'+safeSG+'" data-idx="'+newIdx+'" data-field="entry" onchange="saveETPField(this)"/></td>'+
-    '<td><input class="vd-num-inp" type="number" value="" placeholder="0" data-sg="'+safeSG+'" data-idx="'+newIdx+'" data-field="amt" onchange="saveETPField(this)"/></td>'+
+    '<td><input class="vd-num-inp" type="text" inputmode="numeric" value="" placeholder="0" data-sg="'+safeSG+'" data-idx="'+newIdx+'" data-field="amt" style="text-align:right;width:100%" onfocus="etpFocusAmt(this)" onblur="etpBlurAmt(this)" onchange="saveETPField(this)" data-raw=""/></td>'+
     '<td><button class="vd-del-btn" data-sg="'+safeSG+'" data-idx="'+newIdx+'" onclick="delETPRow(this.dataset.sg,parseInt(this.dataset.idx))" title="Remove">&#10005;</button></td>';
   body.appendChild(row);
   markDirty();
@@ -2341,14 +2770,91 @@ function exportExcel(){
 function buildExcelFile(){
   var wb=XLSX.utils.book_new(),d=getPrelim(),bySG=grpBy(d,'sg');
   var grpOrder=[],grpSGMap={};d.forEach(function(r){if(!grpSGMap[r.grp]){grpSGMap[r.grp]=[];grpOrder.push(r.grp);}if(grpSGMap[r.grp].indexOf(r.sg)<0)grpSGMap[r.grp].push(r.sg);});grpOrder=grpOrder.filter(function(v,i,a){return a.indexOf(v)===i;});
+
+  // ── Sheet 1: Overview Tab (Full) ──────────────────────────────────────────
+  // KPI section
+  var tAct=sum(d,'act'),tPlan=sum(d,'plan'),tFcst=sum(d,'fcst'),avp=tAct-tPlan,avf=tAct-tFcst;
+  var GT_ACC_SGS=['ITS_Other_Costs','Other_Recoveries','Entertainment','Meetings','Travel','Telecom'];
+  var gtAccrSum=GT_ACC_SGS.reduce(function(s,sg){return s+(parseFloat(STORE.acc['OV|'+sg])||0);},0);
+  var ovSheet=[
+    ['ITS Cost Report Dashboard — Overview Tab'],
+    ['Generated:', new Date().toLocaleString()],
+    [],
+    ['=== KPI SUMMARY ==='],
+    ['Total Actuals','Total Plan','Total Forecast','Act vs Plan','Act vs Forecast','Grand Total Accruals/Reversals','Grand Total Proj Var Post Adj'],
+    [tAct,tPlan,tFcst,avp,avf,gtAccrSum,avf+gtAccrSum],
+    [],
+    ['=== ACCOUNT SUBGROUP SUMMARY ==='],
+    ['Account Group','Account Sub Group','Actuals','Plan','Forecast','Act vs Plan','Act vs Fcst','Accruals / Reversals','Proj Var Post Adj','Comments']
+  ];
+  grpOrder.forEach(function(grp){
+    grpSGMap[grp].forEach(function(sg){
+      var rows=bySG[sg]||[];
+      var sAct=sum(rows,'act'),sPlan=sum(rows,'plan'),sFcst=sum(rows,'fcst'),sAvp=sAct-sPlan,sAvf=sAct-sFcst;
+      var safeSG=sg.replace(/[^a-zA-Z0-9]/g,'_');
+      var accVal=parseFloat(STORE.acc['OV|'+safeSG]||0)||0;
+      var cmtKey='OV|cmt|'+safeSG; var cmt=STORE.ovc?STORE.ovc[cmtKey]||'':'';
+      ovSheet.push([grp,sg,sAct,sPlan,sFcst,sAvp,sAvf,accVal,sAvf+accVal,cmt]);
+    });
+  });
+  ovSheet.push([]);
+  ovSheet.push(['=== ENTRIES TO BE POSTED ===']);
+  ovSheet.push(['Account Sub Group','Expected Entries','Amount ($)','— Grand Total per Sub Group —','']);
+  var VD_GROUPS=['Telecom USI','Telecom US','ITS Other Costs','Travel','Entertainment','Meetings'];
+  VD_GROUPS.forEach(function(sg){
+    var safeSG=sg.replace(/[^a-zA-Z0-9]/g,'_');
+    var entries=[];try{entries=JSON.parse(STORE.etp['etp|'+safeSG]||'[]');}catch(e){}
+    var etpGT=entries.reduce(function(s,en){return s+(parseFloat(en.amt)||0);},0);
+    entries.forEach(function(en,i){
+      if(!en.entry&&!parseFloat(en.amt)) return;
+      ovSheet.push([i===0?sg:'', en.entry||'', parseFloat(en.amt)||0, i===0?'Grand Total':'', i===0?etpGT:'']);
+    });
+    if(!entries.some(function(en){return en.entry||parseFloat(en.amt);})){
+      ovSheet.push([sg,'(no entries)',0,'Grand Total',0]);
+    }
+  });
+  ovSheet.push([]);
+  ovSheet.push(['=== VARIANCE DRIVING FACTORS ===']);
+  ovSheet.push(['Account Sub Group','Variance Driver','Amount ($)','Grand Total','Others']);
+  VD_GROUPS.forEach(function(sg){
+    var safeSG=sg.replace(/[^a-zA-Z0-9]/g,'_');
+    var exRows;
+    if(safeSG==='Telecom_USI'){exRows=d.filter(function(r){return r.sg==='Telecom'&&r.reg==='USI';});}
+    else if(safeSG==='Telecom_US'){exRows=d.filter(function(r){return r.sg==='Telecom'&&(r.reg==='US'||r.reg==='Mexico'||r.reg==='Costa Rica');});}
+    else{exRows=bySG[sg]||[];}
+    var sAvf=sum(exRows,'act')-sum(exRows,'fcst'),accVal=parseFloat(STORE.acc['OV|'+safeSG]||0)||0,grandTotal=sAvf+accVal;
+    var drivers=[];try{drivers=JSON.parse(STORE.vd['vd|'+safeSG]||'[]');}catch(e){}
+    var dSum=drivers.reduce(function(s,dr){return s+(parseFloat(dr.amt)||0);},0);
+    var hasDrivers=drivers.some(function(dr){return dr.name||parseFloat(dr.amt);});
+    drivers.forEach(function(dr,i){
+      if(!dr.name&&!parseFloat(dr.amt)) return;
+      ovSheet.push([i===0?sg:'',dr.name||'',parseFloat(dr.amt)||0,i===0?grandTotal:'',i===0?grandTotal-dSum:'']);
+    });
+    if(!hasDrivers) ovSheet.push([sg,'(no drivers)',0,grandTotal,grandTotal]);
+  });
+  var wsOV=XLSX.utils.aoa_to_sheet(ovSheet);
+  wsOV['!cols']=[{wch:22},{wch:30},{wch:16},{wch:16},{wch:16},{wch:16},{wch:16},{wch:20},{wch:20},{wch:40}];
+  // Bold the section headers (rows that start with ===)
+  ovSheet.forEach(function(row,ri){
+    if(row[0]&&String(row[0]).startsWith('===')){
+      var cellAddr=XLSX.utils.encode_cell({r:ri,c:0});
+      if(wsOV[cellAddr]){ wsOV[cellAddr].s={font:{bold:true}}; }
+    }
+  });
+  XLSX.utils.book_append_sheet(wb,wsOV,'Overview');
+
+  // ── Sheet 2: Subgroup Summary ─────────────────────────────────────────────
   var sSum=[['Account Group','Account Sub Group','Actuals','Plan','Forecast','Act vs Plan','Act vs Fcst','Accruals / Reversals','Proj Var Post Adj']];
   grpOrder.forEach(function(grp){grpSGMap[grp].forEach(function(sg){var rows=bySG[sg]||[];var sAct=sum(rows,'act'),sPlan=sum(rows,'plan'),sFcst=sum(rows,'fcst'),sAvp=sAct-sPlan,sAvf=sAct-sFcst;var safeSG=sg.replace(/[^a-zA-Z0-9]/g,'_'),accVal=parseFloat(STORE.acc['OV|'+safeSG]||0)||0;sSum.push([grp,sg,sAct,sPlan,sFcst,sAvp,sAvf,accVal,sAvf+accVal]);});});
   var ws1=XLSX.utils.aoa_to_sheet(sSum);ws1['!cols']=[{wch:22},{wch:25},{wch:14},{wch:14},{wch:14},{wch:14},{wch:14},{wch:18},{wch:18}];XLSX.utils.book_append_sheet(wb,ws1,'Subgroup Summary');
+
+  // ── Sheet 3: Prelim SA Detail ─────────────────────────────────────────────
   var sPrelim=[['Account Group','Account Sub Group','Service Area','Actuals','Plan','Forecast','Act vs Plan','Act vs Fcst','Comments']];
   grpOrder.forEach(function(grp){grpSGMap[grp].forEach(function(sg){var rows=bySG[sg]||[],bySA=grpBy(rows,'sa');Object.keys(bySA).sort().forEach(function(sa){var sR=bySA[sa],sA=sum(sR,'act'),sP=sum(sR,'plan'),sF=sum(sR,'fcst'),k='P|'+sg+'|'+sa;sPrelim.push([grp,sg,sa,sA,sP,sF,sA-sP,sA-sF,STORE.cmt[k]||'']);});var tA=sum(rows,'act'),tP=sum(rows,'plan'),tF=sum(rows,'fcst');sPrelim.push([grp,sg,'TOTAL',tA,tP,tF,tA-tP,tA-tF,'']);});});
   var ws2=XLSX.utils.aoa_to_sheet(sPrelim);ws2['!cols']=[{wch:22},{wch:22},{wch:28},{wch:14},{wch:14},{wch:14},{wch:14},{wch:14},{wch:35}];XLSX.utils.book_append_sheet(wb,ws2,'Prelim SA Detail');
+
+  // ── Sheet 4: Variance Drivers ─────────────────────────────────────────────
   var sVD=[['Account Sub Group','Variance Driver','Amount','Grand Total','Others']];
-  var VD_GROUPS=['Telecom USI','Telecom US','ITS Other Costs','Travel','Entertainment','Meetings'];
   VD_GROUPS.forEach(function(sg){var safeSG=sg.replace(/[^a-zA-Z0-9]/g,'_');
     var exRows;
     if(safeSG==='Telecom_USI'){exRows=d.filter(function(r){return r.sg==='Telecom'&&r.reg==='USI';});}
@@ -2356,10 +2862,24 @@ function buildExcelFile(){
     else{exRows=bySG[sg]||[];}
     var sAvf=sum(exRows,'act')-sum(exRows,'fcst'),accVal=parseFloat(STORE.acc['OV|'+safeSG]||0)||0,grandTotal=sAvf+accVal,drivers=[];try{drivers=JSON.parse(STORE.vd['vd|'+safeSG]||'[]');}catch(e){}var dSum=drivers.reduce(function(s,dr){return s+(parseFloat(dr.amt)||0);},0);drivers.forEach(function(dr,i){sVD.push([i===0?sg:'',dr.name||'',parseFloat(dr.amt)||0,i===0?grandTotal:'',i===0?grandTotal-dSum:'']);});if(!drivers.length)sVD.push([sg,'(no drivers)',0,grandTotal,grandTotal]);});
   var ws3=XLSX.utils.aoa_to_sheet(sVD);ws3['!cols']=[{wch:22},{wch:30},{wch:14},{wch:14},{wch:14}];XLSX.utils.book_append_sheet(wb,ws3,'Variance Drivers');
+
+  // ── Sheet 5: Entries to be Posted ────────────────────────────────────────
+  var sETP=[['Account Sub Group','Expected Entry','Amount ($)','Grand Total']];
+  VD_GROUPS.forEach(function(sg){
+    var safeSG=sg.replace(/[^a-zA-Z0-9]/g,'_');
+    var entries=[];try{entries=JSON.parse(STORE.etp['etp|'+safeSG]||'[]');}catch(e){}
+    var etpGT=entries.reduce(function(s,en){return s+(parseFloat(en.amt)||0);},0);
+    entries.forEach(function(en,i){sETP.push([i===0?sg:'',en.entry||'',parseFloat(en.amt)||0,i===0?etpGT:'']);});
+    if(!entries.length) sETP.push([sg,'(no entries)',0,0]);
+  });
+  var ws5=XLSX.utils.aoa_to_sheet(sETP);ws5['!cols']=[{wch:22},{wch:35},{wch:14},{wch:14}];XLSX.utils.book_append_sheet(wb,ws5,'Entries to be Posted');
+
+  // ── Sheet 6: Filters Applied ──────────────────────────────────────────────
   var sFilters=[['Filter','Selected Values']],flbls={grp:'Account Group',sg:'Account Sub Group',sa:'Service Area',reg:'Region',per:'Fiscal Period',gld:'GL Description'};
   Object.keys(SEL).forEach(function(k){sFilters.push([flbls[k]||k,SEL[k].size?Array.from(SEL[k]).join(', '):'(All)']);});
   sFilters.push(['Export Date',new Date().toLocaleString()]);
   var ws4=XLSX.utils.aoa_to_sheet(sFilters);ws4['!cols']=[{wch:22},{wch:50}];XLSX.utils.book_append_sheet(wb,ws4,'Filters Applied');
+
   XLSX.writeFile(wb,'ITS_Cost_Dashboard_Export.xlsx');
 }
 
